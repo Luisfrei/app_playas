@@ -1,17 +1,25 @@
 import unicodedata
 from datetime import date, timedelta
 
+import time
+from requests.exceptions import ConnectionError, Timeout, SSLError, HTTPError
+
 import requests
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Playas Asturias - AEMET", layout="wide")
-st.title("🌊 Predicción por horas en playas de Asturias")
+st.title("🌊 Predicción por horas en playas de Asturias para Alicia ")
 
-# =========================================================
-# PEGA AQUÍ TU API KEY NUEVA / ACTUAL
-# =========================================================
-AEMET_API_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmcmVpcmVnYXJjaWFsdWlzQGdtYWlsLmNvbSIsImp0aSI6IjBjZTJkMmJhLThmY2MtNDRjZC1iZWVmLTA1YjRmNTBmMTE2NSIsImlzcyI6IkFFTUVUIiwiaWF0IjoxNzc5Mzk1NzM1LCJ1c2VySWQiOiIwY2UyZDJiYS04ZmNjLTQ0Y2QtYmVlZi0wNWI0ZjUwZjExNjUiLCJyb2xlIjoiIn0.rDZ67UCf1QPbKuyPi04P_RJg04Dy1zRTl6VvflYDReA"
+import os
+
+try:
+    AEMET_API_KEY = st.secrets.get("AEMET_API_KEY")
+except Exception:
+    AEMET_API_KEY = None
+
+if not AEMET_API_KEY:
+    AEMET_API_KEY = os.getenv("AEMET_API_KEY")
 
 AEMET_BASE = "https://opendata.aemet.es/opendata"
 
@@ -25,6 +33,13 @@ BEACHES = [
 ]
 
 # ---------- utilidades ----------
+
+WEBCAMS = {
+    "San Lorenzo (Gijón)": "https://www.webcamsdeasturias.com/asturias/centro/gijon/gijon/la-escalerona-playa-de-san-lorenzo-hd/148/",
+    "Aguilar (Muros de Nalón)": "https://www.webcamsdeasturias.com/asturias/bajo-nalon/muros-del-nalon/aguilar/playa-de-aguilar/122/",
+    "La Concha de Artedo (Cudillero)": "https://www.webcamsdeasturias.com/asturias/comarca-vaqueira/cudillero/cudillero/playa-de-la-concha-de-artedo/151/",
+    "Rodiles (Villaviciosa)": "https://www.webcamsdeasturias.com/asturias/comarca-de-la-sidra/villaviciosa/rodiles/rodiles-surf-hd/120/",
+}
 
 def norm_txt(s: str) -> str:
     s = (s or "").strip().lower()
@@ -51,6 +66,23 @@ def pick_icon(desc: str) -> str:
         return "☁️"
     return "🌤️"
 
+def classify_oleaje_marin(wave):
+    try:
+        w = float(wave)
+    except Exception:
+        return ""
+
+    if w < 0.5:
+        return "🌊 Muy tranquilo"
+    elif w < 1:
+        return "🌊 Tranquilo"
+    elif w < 1.5:
+        return "🌊 Algo movido"
+    elif w < 2:
+        return "🌊 Movido"
+    else:
+        return "🌊 Muy fuerte"
+
 
 def classify_viento(v_kmh):
     """
@@ -69,25 +101,6 @@ def classify_viento(v_kmh):
         return "💨 Viento moderado"
     else:
         return "🌪️ Viento fuerte"
-
-
-def classify_oleaje_from_wind(v_kmh):
-    """
-    Estimación simple del estado del mar a partir del viento.
-    """
-    try:
-        v = float(v_kmh)
-    except Exception:
-        return ""
-
-    if v < 10:
-        return "🌊 Oleaje en calma"
-    elif v < 20:
-        return "🌊 Oleaje débil"
-    elif v < 30:
-        return "🌊 Oleaje moderado"
-    else:
-        return "🌊 Oleaje fuerte"
 
 
 def classify_lluvia(prob):
@@ -169,18 +182,19 @@ def get_marine_data(lat: float, lon: float):
     - wave_height (m)
     - wave_period (s)
     - wave_direction (°)
-    - sea_level_height (m, incluye mareas)
     """
     url = "https://marine-api.open-meteo.com/v1/marine"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "wave_height,wave_period,wave_direction,sea_level_height",
-        "forecast_days": 2,
-        "timezone": "Europe/Madrid",
+        "hourly": "wave_height,wave_period,wave_direction",
+        "forecast_days": 4,
+        "timezone": "auto",
     }
 
     r = requests.get(url, params=params, timeout=30)
+    if r.status_code == 400:
+        raise RuntimeError(f"Open-Meteo respondió 400: {r.text}")
     r.raise_for_status()
     return r.json()
 
@@ -278,6 +292,40 @@ def describe_tide_state(sea_levels, idx):
 
     return estado, ""
 
+def get_json_with_retries(url, params=None, timeout=30, tries=4):
+    """
+    Hace una petición GET con reintentos y backoff.
+    Sirve tanto para AEMET como para la API marina.
+    """
+    last_err = None
+
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+
+            # Si hay rate limit, espera y reintenta
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 2 ** i))
+                time.sleep(wait)
+                continue
+
+            r.raise_for_status()
+            return r.json()
+
+        except (ConnectionError, Timeout, SSLError) as e:
+            last_err = e
+            time.sleep(2 ** i)
+
+        except HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+
+            if status in (429, 500, 502, 503, 504):
+                last_err = e
+                time.sleep(2 ** i)
+            else:
+                raise
+
+    raise RuntimeError(f"Fallo de conexión tras {tries} intentos. Último error: {last_err}")
 
 
 # ---------- AEMET OpenData: patrón 2 pasos (meta -> datos) ----------
@@ -424,12 +472,59 @@ def extract_day_block(pred_json, target_date_iso: str):
 
     return None
 
+WEEKDAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+def extract_available_days(pred_json):
+    """
+    Saca las fechas disponibles dentro de prediccion.dia[]
+    """
+    root = pred_json[0] if isinstance(pred_json, list) and pred_json else pred_json
+    if not isinstance(root, dict):
+        return []
+
+    pred = root.get("prediccion")
+    dias = []
+
+    if isinstance(pred, dict):
+        dias = pred.get("dia") or []
+    elif isinstance(pred, list):
+        dias = pred
+
+    out = []
+    for d in dias:
+        if not isinstance(d, dict):
+            continue
+        fecha = (d.get("fecha") or d.get("fechaPrediccion") or "")[:10]
+        if fecha:
+            out.append(fecha)
+
+    return out
+
+
+def format_day_label(fecha_iso):
+    """
+    Convierte una fecha ISO (YYYY-MM-DD) en:
+    Hoy / Mañana / Lunes / Martes ...
+    """
+    d = date.fromisoformat(fecha_iso)
+    today = date.today()
+
+    if d == today:
+        return "Hoy"
+    elif d == today + timedelta(days=1):
+        return "Mañana"
+    else:
+        return WEEKDAYS_ES[d.weekday()]
 
 # ---------- UI ----------
+
 playa = st.selectbox("Elige playa", [b["name"] for b in BEACHES])
 b = next(x for x in BEACHES if x["name"] == playa)
 
-st.subheader("🕒 Predicción por horas (mañana) con iconos")
+if webcam_url := WEBCAMS.get(playa):
+    st.link_button("📷 Ver webcam en directo", webcam_url)
+
+st.subheader("🕒 Predicción por horas")
 
 try:
     municipio_id = find_municipio_id_by_name(b["municipio_nombre"])
@@ -442,6 +537,17 @@ try:
         st.stop()
 
     pred = get_pred_municipio_horaria(municipio_id)
+    available_days = extract_available_days(pred)
+    available_days = available_days[:4]
+
+    if not available_days:
+        st.warning("No hay días disponibles en la predicción.")
+        st.stop()
+
+    # Mostrar selector de día (etiqueta amigable + fecha ISO)
+    day_labels = [f"{format_day_label(d)} — {d}" for d in available_days]
+    selected_label = st.selectbox("Elige día", day_labels, index=0)
+    selected_day = selected_label.split(" — ")[1]
 
     marine = get_marine_data(b["lat"], b["lon"])
     marine_hourly = marine.get("hourly", {})
@@ -452,28 +558,28 @@ try:
     sea_level = marine_hourly.get("sea_level_height", [])
 
 
-    manana = (date.today() + timedelta(days=1)).isoformat()
-    bloque = extract_day_block(pred, manana)
+    # Usamos el día seleccionado por el usuario
+    bloque = extract_day_block(pred, selected_day)
 
     marine_map = {}
 
     for i, t in enumerate(marine_times):
-       # t viene tipo "2026-05-22T08:00"
-       if t.startswith(manana):
-           hora = t[11:13]  # "08"
-           estado_marea, fase_marea = describe_tide_state(sea_level, i)
+        # t viene tipo "2026-05-22T08:00"
+        if t.startswith(selected_day):
+            hora = t[11:13]  # "08"
+            estado_marea, fase_marea = describe_tide_state(sea_level, i)
 
-           marine_map[hora] = {
-               "wave_height": wave_height[i] if i < len(wave_height) else "",
-               "wave_period": wave_period[i] if i < len(wave_period) else "",
-               "sea_level": sea_level[i] if i < len(sea_level) else "",
-               "estado_marea": estado_marea,
-               "fase_marea": fase_marea,
-           }
+            marine_map[hora] = {
+                "wave_height": wave_height[i] if i < len(wave_height) else "",
+                "wave_period": wave_period[i] if i < len(wave_period) else "",
+                "sea_level": sea_level[i] if i < len(sea_level) else "",
+                "estado_marea": estado_marea,
+                "fase_marea": fase_marea,
+            }
 
 
     if not bloque:
-        st.warning(f"No encontré el bloque de predicción para {manana}.")
+        st.warning(f"No encontré el bloque de predicción para {selected_label}.")
         st.info("Te muestro el JSON para que me pegues la estructura y lo ajusto en 1 minuto:")
         st.json(pred)
         st.stop()
@@ -493,17 +599,16 @@ try:
         desc = str(estado_map.get(h, ""))
         viento = viento_map.get(h, "")
 
+        marine_row = marine_map.get(h, {})
+
         rows.append({
             "Hora": f"{h}:00",
             "Tiempo": pick_icon(desc),
             "Temp (°C)": temp_map.get(h, ""),
             "Prob. lluvia (%)": classify_lluvia(probprec_map.get(h, 0)),
             "Viento": classify_viento(viento),
-            "Oleaje (m)": marine_row.get("wave_height", ""),
-            "Periodo ola (s)": marine_row.get("wave_period", ""),
-            "Marea": marine_row.get("estado_marea", ""),
-            "Fase marea": marine_row.get("fase_marea", ""),
-
+            "Oleaje (m)": classify_oleaje_marin(marine_row.get("wave_height", "")),
+    
         })
 
     df = pd.DataFrame(rows)
