@@ -1,0 +1,513 @@
+import unicodedata
+from datetime import date, timedelta
+
+import requests
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="Playas Asturias - AEMET", layout="wide")
+st.title("🌊 Predicción por horas en playas de Asturias")
+
+# =========================================================
+# PEGA AQUÍ TU API KEY NUEVA / ACTUAL
+# =========================================================
+AEMET_API_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmcmVpcmVnYXJjaWFsdWlzQGdtYWlsLmNvbSIsImp0aSI6IjBjZTJkMmJhLThmY2MtNDRjZC1iZWVmLTA1YjRmNTBmMTE2NSIsImlzcyI6IkFFTUVUIiwiaWF0IjoxNzc5Mzk1NzM1LCJ1c2VySWQiOiIwY2UyZDJiYS04ZmNjLTQ0Y2QtYmVlZi0wNWI0ZjUwZjExNjUiLCJyb2xlIjoiIn0.rDZ67UCf1QPbKuyPi04P_RJg04Dy1zRTl6VvflYDReA"
+
+AEMET_BASE = "https://opendata.aemet.es/opendata"
+
+# 3 playas + municipio asociado (predicción horaria por municipio)
+BEACHES = [
+    {"name": "San Lorenzo (Gijón)", "municipio_nombre": "Gijón", "lat": 43.5405, "lon": -5.65487},
+    {"name": "Rodiles (Villaviciosa)", "municipio_nombre": "Villaviciosa", "lat": 43.532527, "lon": -5.38244},
+    {"name": "Torimbia (Llanes)", "municipio_nombre": "Llanes", "lat": 43.4424125, "lon": -4.8550563888889},
+    {"name": "Aguilar (Muros de Nalón)", "municipio_nombre": "Muros de Nalón", "lat": 43.5558, "lon": -6.1173},
+    {"name": "La Concha de Artedo (Cudillero)", "municipio_nombre": "Cudillero", "lat": 43.562699, "lon": -6.185861},
+]
+
+# ---------- utilidades ----------
+
+def norm_txt(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
+    return s
+
+
+def pick_icon(desc: str) -> str:
+    d = norm_txt(desc)
+    if "tormenta" in d:
+        return "⛈️"
+    if any(k in d for k in ["lluv", "chubasc", "precipit"]):
+        return "🌧️"
+    if any(k in d for k in ["nieve", "nev"]):
+        return "❄️"
+    if any(k in d for k in ["niebla", "bruma"]):
+        return "🌫️"
+    if any(k in d for k in ["despejado", "soleado"]):
+        return "☀️"
+    if any(k in d for k in ["nub", "cubierto", "nubes"]):
+        return "☁️"
+    return "🌤️"
+
+
+def classify_viento(v_kmh):
+    """
+    Clasifica el viento en 4 rangos sencillos.
+    """
+    try:
+        v = float(v_kmh)
+    except Exception:
+        return ""
+
+    if v < 5:
+        return "🍃 Sin viento"
+    elif v < 15:
+        return "🌬️ Viento suave"
+    elif v < 30:
+        return "💨 Viento moderado"
+    else:
+        return "🌪️ Viento fuerte"
+
+
+def classify_oleaje_from_wind(v_kmh):
+    """
+    Estimación simple del estado del mar a partir del viento.
+    """
+    try:
+        v = float(v_kmh)
+    except Exception:
+        return ""
+
+    if v < 10:
+        return "🌊 Oleaje en calma"
+    elif v < 20:
+        return "🌊 Oleaje débil"
+    elif v < 30:
+        return "🌊 Oleaje moderado"
+    else:
+        return "🌊 Oleaje fuerte"
+
+
+def classify_lluvia(prob):
+    """
+    Convierte la probabilidad de lluvia en rangos de texto.
+    Si viene vacío o no se puede leer, lo tratamos como 0.
+    """
+    try:
+        p = float(prob)
+    except Exception:
+        p = 0
+
+    if p <= 0:
+        return "Sin lluvia"
+    elif p < 30:
+        return "🌦️ Puede llover un poco"
+    elif p < 70:
+        return "🌧️ Casi seguro que llueve"
+    else:
+        return "⛈️ Llueve seguro"
+
+
+def map_periodo_list(items):
+    """
+    Convierte listas tipo:
+      [{"periodo":"00","descripcion":"Despejado"}, {"periodo":"01","descripcion":"Nuboso"}]
+    o:
+      [{"periodo":"00","value": 18}]
+    en un dict: {"00": valor, "01": valor}
+    """
+    out = {}
+
+    if not isinstance(items, list):
+        return out
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        per = str(it.get("periodo") or it.get("hora") or "")
+        if "-" in per:
+            per = per.split("-")[0]
+        per = per.zfill(2)
+
+        val = it.get("value")
+        if val is None:
+            val = it.get("descripcion") or it.get("desc") or it.get("estado") or ""
+
+        out[per] = val
+
+    return out
+
+
+def extract_viento_map(bloque):
+    """
+    Intenta sacar velocidad de viento por hora del bloque de predicción.
+    Según cómo venga el JSON, puede variar un poco la estructura.
+    """
+    viento = bloque.get("vientoAndRachaMax") or bloque.get("viento") or {}
+
+    # Caso 1: viene como dict con "dato"
+    if isinstance(viento, dict):
+        if "dato" in viento and isinstance(viento["dato"], list):
+            return map_periodo_list(viento["dato"])
+
+        if "velocidad" in viento and isinstance(viento["velocidad"], list):
+            return map_periodo_list(viento["velocidad"])
+
+    # Caso 2: viene directamente como lista
+    if isinstance(viento, list):
+        return map_periodo_list(viento)
+
+    return {}
+
+@st.cache_data(ttl=3600)
+def get_marine_data(lat: float, lon: float):
+    """
+    Open-Meteo Marine API:
+    - wave_height (m)
+    - wave_period (s)
+    - wave_direction (°)
+    - sea_level_height (m, incluye mareas)
+    """
+    url = "https://marine-api.open-meteo.com/v1/marine"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "wave_height,wave_period,wave_direction,sea_level_height",
+        "forecast_days": 2,
+        "timezone": "Europe/Madrid",
+    }
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def sign(x):
+    if x > 0:
+        return 1
+    if x < 0:
+        return -1
+    return 0
+
+
+def find_prev_turn(values, idx):
+    """
+    Busca el último cambio de tendencia antes del índice actual.
+    """
+    if idx <= 1:
+        return 0
+
+    current_dir = sign(values[idx] - values[idx - 1])
+    if current_dir == 0:
+        return max(0, idx - 1)
+
+    for j in range(idx - 1, 0, -1):
+        d = sign(values[j] - values[j - 1])
+        if d != 0 and d != current_dir:
+            return j
+
+    return 0
+
+
+def find_next_turn(values, idx):
+    """
+    Busca el siguiente cambio de tendencia después del índice actual.
+    """
+    if idx >= len(values) - 2:
+        return len(values) - 1
+
+    current_dir = sign(values[idx + 1] - values[idx])
+    if current_dir == 0:
+        return min(len(values) - 1, idx + 1)
+
+    for j in range(idx + 1, len(values) - 1):
+        d = sign(values[j + 1] - values[j])
+        if d != 0 and d != current_dir:
+            return j
+
+    return len(values) - 1
+
+
+def describe_tide_state(sea_levels, idx):
+    """
+    Devuelve:
+    - dirección de marea (subiendo/bajando)
+    - porcentaje de la fase actual
+    """
+    if idx <= 0 or idx >= len(sea_levels) - 1:
+        return "", ""
+
+    current = sea_levels[idx]
+    prev_val = sea_levels[idx - 1]
+    next_val = sea_levels[idx + 1]
+
+    # Dirección de la marea
+    if next_val > current:
+        estado = "⬆️ Subiendo"
+    elif next_val < current:
+        estado = "⬇️ Bajando"
+    else:
+        estado = "⏸️ Estable"
+
+    prev_turn = find_prev_turn(sea_levels, idx)
+    next_turn = find_next_turn(sea_levels, idx)
+
+    a = sea_levels[prev_turn]
+    b = sea_levels[next_turn]
+
+    # Evitar división por cero
+    if a == b:
+        return estado, ""
+
+    # Si sube: desde mínimo anterior a máximo siguiente
+    if estado.startswith("⬆️"):
+        progreso = (current - a) / (b - a) * 100 if (b - a) != 0 else 0
+        progreso = max(0, min(100, progreso))
+        fase = f"{progreso:.0f}% de la subida"
+        return estado, fase
+
+    # Si baja: desde máximo anterior a mínimo siguiente
+    if estado.startswith("⬇️"):
+        progreso = (a - current) / (a - b) * 100 if (a - b) != 0 else 0
+        progreso = max(0, min(100, progreso))
+        fase = f"{progreso:.0f}% de la bajada"
+        return estado, fase
+
+    return estado, ""
+
+
+
+# ---------- AEMET OpenData: patrón 2 pasos (meta -> datos) ----------
+
+import time
+
+def aemet_two_step_json(api_path: str):
+    """
+    AEMET OpenData responde en 2 pasos:
+    1) endpoint meta -> JSON con 'datos'
+    2) GET a esa URL 'datos' -> JSON real
+    """
+    if not AEMET_API_KEY or AEMET_API_KEY == "PEGA_AQUI_TU_API_KEY":
+        raise RuntimeError("Pega tu API key en la variable AEMET_API_KEY del código.")
+
+    url_meta = f"{AEMET_BASE}/api{api_path}"
+
+    # Reintentos en la llamada META
+    for intento in range(5):
+        r1 = requests.get(url_meta, params={"api_key": AEMET_API_KEY}, timeout=25)
+
+        if r1.status_code == 429:
+            espera = 2 ** intento
+            time.sleep(espera)
+            continue
+
+        r1.raise_for_status()
+        meta = r1.json()
+        break
+    else:
+        raise RuntimeError("AEMET devolvió 429 demasiadas veces en la llamada meta.")
+
+    datos_url = meta.get("datos")
+    if not datos_url:
+        raise RuntimeError(f"No llegó 'datos'. Respuesta meta: {meta}")
+
+    # Reintentos en la llamada DATOS
+    for intento in range(5):
+        r2 = requests.get(datos_url, timeout=60)
+
+        if r2.status_code == 429:
+            espera = 2 ** intento
+            time.sleep(espera)
+            continue
+
+        r2.raise_for_status()
+        return r2.json()
+
+    raise RuntimeError("AEMET devolvió 429 demasiadas veces en la llamada de datos.")
+
+# ---------- Maestro municipios: obtener ID ----------
+
+@st.cache_data(ttl=86400)
+def get_maestro_municipios():
+    return aemet_two_step_json("/maestro/municipios")
+
+
+def normalize_municipio_id(mid) -> str:
+    s = str(mid).strip().lower()
+
+    # Si viene con prefijo "id", lo quitamos
+    if s.startswith("id"):
+        s = s[2:]
+
+    # Dejamos solo dígitos
+    s = "".join(ch for ch in s if ch.isdigit())
+
+    # Rellenamos con ceros a la izquierda si hiciera falta
+    if len(s) < 5:
+        s = s.zfill(5)
+
+    return s
+
+
+def find_municipio_id_by_name(nombre_municipio: str):
+    target = norm_txt(nombre_municipio)
+    data = get_maestro_municipios()
+
+    candidates = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+
+        nom = row.get("nombre") or row.get("nombreMunicipio") or row.get("nm") or ""
+        mid = (
+            row.get("id")
+            or row.get("idMunicipio")
+            or row.get("codigo")
+            or row.get("codigoINE")
+            or None
+        )
+
+        if not mid:
+            continue
+
+        nom_n = norm_txt(nom)
+
+        if nom_n == target:
+            return normalize_municipio_id(mid)
+
+        if target in nom_n:
+            candidates.append((len(nom_n), normalize_municipio_id(mid), nom))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    return None
+
+
+# ---------- Predicción horaria por municipio ----------
+
+@st.cache_data(ttl=3600)
+def get_pred_municipio_horaria(municipio_id: str):
+    return aemet_two_step_json(f"/prediccion/especifica/municipio/horaria/{municipio_id}")
+
+def extract_day_block(pred_json, target_date_iso: str):
+    """
+    Intenta localizar el bloque del día YYYY-MM-DD dentro de la predicción.
+    """
+    root = pred_json[0] if isinstance(pred_json, list) and pred_json else pred_json
+    if not isinstance(root, dict):
+        return None
+
+    pred = root.get("prediccion")
+    dias = None
+
+    if isinstance(pred, dict):
+        dias = pred.get("dia") or pred.get("dias")
+    elif isinstance(pred, list):
+        dias = pred
+    else:
+        dias = root.get("dia")
+
+    if not isinstance(dias, list):
+        return None
+
+    for d in dias:
+        if not isinstance(d, dict):
+            continue
+        fecha = (d.get("fecha") or d.get("fechaPrediccion") or "")[:10]
+        if fecha == target_date_iso:
+            return d
+
+    return None
+
+
+# ---------- UI ----------
+playa = st.selectbox("Elige playa", [b["name"] for b in BEACHES])
+b = next(x for x in BEACHES if x["name"] == playa)
+
+st.subheader("🕒 Predicción por horas (mañana) con iconos")
+
+try:
+    municipio_id = find_municipio_id_by_name(b["municipio_nombre"])
+
+    st.write("Municipio seleccionado:", b["municipio_nombre"])
+    st.write("municipio_id encontrado:", municipio_id)
+
+    if not municipio_id:
+        st.error(f"No encontré el ID del municipio: {b['municipio_nombre']}")
+        st.stop()
+
+    pred = get_pred_municipio_horaria(municipio_id)
+
+    marine = get_marine_data(b["lat"], b["lon"])
+    marine_hourly = marine.get("hourly", {})
+
+    marine_times = marine_hourly.get("time", [])
+    wave_height = marine_hourly.get("wave_height", [])
+    wave_period = marine_hourly.get("wave_period", [])
+    sea_level = marine_hourly.get("sea_level_height", [])
+
+
+    manana = (date.today() + timedelta(days=1)).isoformat()
+    bloque = extract_day_block(pred, manana)
+
+    marine_map = {}
+
+    for i, t in enumerate(marine_times):
+       # t viene tipo "2026-05-22T08:00"
+       if t.startswith(manana):
+           hora = t[11:13]  # "08"
+           estado_marea, fase_marea = describe_tide_state(sea_level, i)
+
+           marine_map[hora] = {
+               "wave_height": wave_height[i] if i < len(wave_height) else "",
+               "wave_period": wave_period[i] if i < len(wave_period) else "",
+               "sea_level": sea_level[i] if i < len(sea_level) else "",
+               "estado_marea": estado_marea,
+               "fase_marea": fase_marea,
+           }
+
+
+    if not bloque:
+        st.warning(f"No encontré el bloque de predicción para {manana}.")
+        st.info("Te muestro el JSON para que me pegues la estructura y lo ajusto en 1 minuto:")
+        st.json(pred)
+        st.stop()
+
+    # Estos campos suelen estar presentes; si alguno falta, quedará vacío.
+    estado_map = map_periodo_list(bloque.get("estadoCielo"))
+    probprec_map = map_periodo_list(bloque.get("probPrecipitacion"))
+
+    temp_raw = bloque.get("temperatura", {})
+    temp_list = temp_raw.get("dato") if isinstance(temp_raw, dict) else temp_raw
+    temp_map = map_periodo_list(temp_list)
+
+    viento_map = extract_viento_map(bloque)
+
+    rows = []
+    for h in [str(i).zfill(2) for i in range(24)]:
+        desc = str(estado_map.get(h, ""))
+        viento = viento_map.get(h, "")
+
+        rows.append({
+            "Hora": f"{h}:00",
+            "Tiempo": pick_icon(desc),
+            "Temp (°C)": temp_map.get(h, ""),
+            "Prob. lluvia (%)": classify_lluvia(probprec_map.get(h, 0)),
+            "Viento": classify_viento(viento),
+            "Oleaje (m)": marine_row.get("wave_height", ""),
+            "Periodo ola (s)": marine_row.get("wave_period", ""),
+            "Marea": marine_row.get("estado_marea", ""),
+            "Fase marea": marine_row.get("fase_marea", ""),
+
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+except Exception as e:
+    st.exception(e)
