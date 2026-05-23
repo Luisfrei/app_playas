@@ -595,7 +595,7 @@ try:
     viento_map = extract_viento_map(bloque)
 
     rows = []
-    for h in [str(i).zfill(2) for i in range(24)]:
+    for h in [f"{i:02d}" for i in range(9, 22)]:
         desc = str(estado_map.get(h, ""))
         viento = viento_map.get(h, "")
 
