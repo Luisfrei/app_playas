@@ -597,6 +597,9 @@ try:
         viento = viento_map.get(h, "")
 
         marine_row = marine_map.get(h, {})
+        marea_status = marine_row.get("estado_marea", "")
+        marea_fase = marine_row.get("fase_marea", "")
+        marea_text = f"{marea_status} {marea_fase}".strip()
 
         rows.append({
             "Hora": f"{h}:00",
@@ -605,6 +608,7 @@ try:
             "Lluvia": classify_lluvia(probprec_map.get(h, 0)),
             "Viento": classify_viento(viento),
             "Oleaje": classify_oleaje_marin(marine_row.get("wave_height", "")),
+            "Marea": marea_text,
     
         })
 
