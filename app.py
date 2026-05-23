@@ -529,9 +529,6 @@ st.subheader("🕒 Predicción por horas")
 try:
     municipio_id = find_municipio_id_by_name(b["municipio_nombre"])
 
-    st.write("Municipio seleccionado:", b["municipio_nombre"])
-    st.write("municipio_id encontrado:", municipio_id)
-
     if not municipio_id:
         st.error(f"No encontré el ID del municipio: {b['municipio_nombre']}")
         st.stop()
@@ -604,10 +601,10 @@ try:
         rows.append({
             "Hora": f"{h}:00",
             "Tiempo": pick_icon(desc),
-            "Temp (°C)": temp_map.get(h, ""),
-            "Prob. lluvia (%)": classify_lluvia(probprec_map.get(h, 0)),
+            "Temp": temp_map.get(h, ""),
+            "Lluvia": classify_lluvia(probprec_map.get(h, 0)),
             "Viento": classify_viento(viento),
-            "Oleaje (m)": classify_oleaje_marin(marine_row.get("wave_height", "")),
+            "Oleaje": classify_oleaje_marin(marine_row.get("wave_height", "")),
     
         })
 
