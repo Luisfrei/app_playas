@@ -1,5 +1,7 @@
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+import re
 
 import time
 from requests.exceptions import ConnectionError, Timeout, SSLError, HTTPError
@@ -210,11 +212,19 @@ def sign(x):
 def find_prev_turn(values, idx):
     """
     Busca el último cambio de tendencia antes del índice actual.
+    Si el índice actual es un extremo local que marca el inicio de una nueva fase,
+    devuelve el mismo índice para que el progreso empiece en 0%.
     """
-    if idx <= 1:
+    if idx <= 0:
         return 0
 
-    current_dir = sign(values[idx] - values[idx - 1])
+    prev_diff = sign(values[idx] - values[idx - 1]) if idx - 1 >= 0 else 0
+    next_diff = sign(values[idx + 1] - values[idx]) if idx + 1 < len(values) else prev_diff
+
+    if prev_diff != 0 and next_diff != 0 and prev_diff != next_diff:
+        return idx
+
+    current_dir = next_diff if next_diff != 0 else prev_diff
     if current_dir == 0:
         return max(0, idx - 1)
 
@@ -229,13 +239,23 @@ def find_prev_turn(values, idx):
 def find_next_turn(values, idx):
     """
     Busca el siguiente cambio de tendencia después del índice actual.
+    Si el punto siguiente es un extremo local, devuelve el siguiente índice.
     """
     if idx >= len(values) - 2:
         return len(values) - 1
 
     current_dir = sign(values[idx + 1] - values[idx])
     if current_dir == 0:
-        return min(len(values) - 1, idx + 1)
+        # Avanza hasta el siguiente tramo con dirección no nula.
+        for j in range(idx + 1, len(values) - 1):
+            d = sign(values[j + 1] - values[j])
+            if d != 0:
+                return j
+        return len(values) - 1
+
+    next_dir = sign(values[idx + 2] - values[idx + 1]) if idx + 2 < len(values) else current_dir
+    if next_dir != 0 and next_dir != current_dir:
+        return idx + 1
 
     for j in range(idx + 1, len(values) - 1):
         d = sign(values[j + 1] - values[j])
@@ -249,7 +269,7 @@ def describe_tide_state(sea_levels, idx):
     """
     Devuelve:
     - dirección de marea (subiendo/bajando)
-    - porcentaje de la fase actual
+    - porcentaje restante hasta completar la subida o bajada
     """
     if idx <= 0 or idx >= len(sea_levels) - 1:
         return "", ""
@@ -278,16 +298,18 @@ def describe_tide_state(sea_levels, idx):
 
     # Si sube: desde mínimo anterior a máximo siguiente
     if estado.startswith("⬆️"):
-        progreso = (current - a) / (b - a) * 100 if (b - a) != 0 else 0
-        progreso = max(0, min(100, progreso))
-        fase = f"{progreso:.0f}% de la subida"
+        progreso = (current - a) / (b - a) if (b - a) != 0 else 0
+        progreso = max(0.0, min(1.0, progreso))
+        restante = int(round(progreso * 100))
+        fase = f"{restante}%"
         return estado, fase
 
     # Si baja: desde máximo anterior a mínimo siguiente
     if estado.startswith("⬇️"):
-        progreso = (a - current) / (a - b) * 100 if (a - b) != 0 else 0
-        progreso = max(0, min(100, progreso))
-        fase = f"{progreso:.0f}% de la bajada"
+        progreso = (a - current) / (a - b) if (a - b) != 0 else 0
+        progreso = max(0.0, min(1.0, progreso))
+        restante = int(round(progreso * 100))
+        fase = f"{restante}%"
         return estado, fase
 
     return estado, ""
@@ -326,6 +348,45 @@ def get_json_with_retries(url, params=None, timeout=30, tries=4):
                 raise
 
     raise RuntimeError(f"Fallo de conexión tras {tries} intentos. Último error: {last_err}")
+
+
+def parse_tide_gra_html(html: str):
+    """
+    Extrae la serie horaria de la salida FORMAT=gra de la API de mareas.
+    """
+    m = re.search(r"var\s+data\s*=\s*(\[.*?\])", html, re.S)
+    if not m:
+        raise RuntimeError("No encontré la serie de mareas en la respuesta gra.")
+
+    raw = m.group(1)
+    points = re.findall(r"\{\s*x\s*:\s*'([^']*)'\s*,\s*y\s*:\s*([0-9.+-]+)\s*\}", raw)
+    out = []
+
+    for timestamp, value in points:
+        dt_utc = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        dt_local = dt_utc.astimezone(ZoneInfo("Europe/Madrid"))
+        out.append({"time": dt_local, "level": float(value)})
+
+    return out
+
+
+@st.cache_data(ttl=3600)
+def get_tide_gra_data(target_date_iso: str):
+    """
+    Devuelve la predicción horaria de marea para el puerto Avilés (San Juan de Nieva).
+    """
+    url = "https://ideihm.covam.es/api-ihm/getmarea"
+    params = {
+        "REQUEST": "gettide",
+        "FORMAT": "gra",
+        "TIME": "1H",
+        "ID": "7",
+        "DATE": target_date_iso.replace("-", ""),
+    }
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return parse_tide_gra_html(r.text)
 
 
 # ---------- AEMET OpenData: patrón 2 pasos (meta -> datos) ----------
@@ -554,6 +615,15 @@ try:
     wave_period = marine_hourly.get("wave_period", [])
     sea_level = marine_hourly.get("sea_level_height", [])
 
+    tide_data = get_tide_gra_data(selected_day)
+    tide_data = [pt for pt in tide_data if pt["time"].date().isoformat() == selected_day]
+    tide_data.sort(key=lambda x: x["time"])
+    tide_hours = [pt["time"].strftime("%H") for pt in tide_data]
+    tide_levels = [pt["level"] for pt in tide_data]
+    tide_index_by_hour = {h: idx for idx, h in enumerate(tide_hours)}
+
+    if not tide_data:
+        st.warning("No hay datos de marea horaria para el día seleccionado.")
 
     # Usamos el día seleccionado por el usuario
     bloque = extract_day_block(pred, selected_day)
@@ -564,14 +634,9 @@ try:
         # t viene tipo "2026-05-22T08:00"
         if t.startswith(selected_day):
             hora = t[11:13]  # "08"
-            estado_marea, fase_marea = describe_tide_state(sea_level, i)
-
             marine_map[hora] = {
                 "wave_height": wave_height[i] if i < len(wave_height) else "",
                 "wave_period": wave_period[i] if i < len(wave_period) else "",
-                "sea_level": sea_level[i] if i < len(sea_level) else "",
-                "estado_marea": estado_marea,
-                "fase_marea": fase_marea,
             }
 
 
@@ -597,9 +662,12 @@ try:
         viento = viento_map.get(h, "")
 
         marine_row = marine_map.get(h, {})
-        marea_status = marine_row.get("estado_marea", "")
-        marea_fase = marine_row.get("fase_marea", "")
-        marea_text = f"{marea_status} {marea_fase}".strip()
+        tide_idx = tide_index_by_hour.get(h)
+        if tide_idx is not None:
+            marea_status, marea_phase = describe_tide_state(tide_levels, tide_idx)
+            marea_text = f"{marea_status} {marea_phase}".strip()
+        else:
+            marea_text = ""
 
         rows.append({
             "Hora": f"{h}:00",
@@ -609,7 +677,6 @@ try:
             "Viento": classify_viento(viento),
             "Oleaje": classify_oleaje_marin(marine_row.get("wave_height", "")),
             "Marea": marea_text,
-    
         })
 
     df = pd.DataFrame(rows)
