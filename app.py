@@ -25,22 +25,27 @@ if not AEMET_API_KEY:
 
 AEMET_BASE = "https://opendata.aemet.es/opendata"
 
-# 3 playas + municipio asociado (predicción horaria por municipio)
-BEACHES = [
-    {"name": "San Lorenzo (Gijón)", "municipio_nombre": "Gijón", "lat": 43.5405, "lon": -5.65487},
-    {"name": "Rodiles (Villaviciosa)", "municipio_nombre": "Villaviciosa", "lat": 43.532527, "lon": -5.38244},
-    {"name": "Torimbia (Llanes)", "municipio_nombre": "Llanes", "lat": 43.4424125, "lon": -4.8550563888889},
-    {"name": "Aguilar (Muros de Nalón)", "municipio_nombre": "Muros de Nalón", "lat": 43.5558, "lon": -6.1173},
-    {"name": "La Concha de Artedo (Cudillero)", "municipio_nombre": "Cudillero", "lat": 43.562699, "lon": -6.185861},
-]
+# ---------- PLAYAS ----------
 
-# ---------- utilidades ----------
+BEACHES = [
+    {"name": "Aguilar", "municipio_nombre": "Muros de Nalón", "lat": 43.5558, "lon": -6.1173},
+    {"name": "La Concha de Artedo", "municipio_nombre": "Cudillero", "lat": 43.562699, "lon": -6.185861},
+    {"name": "San Lorenzo", "municipio_nombre": "Gijón", "lat": 43.5405, "lon": -5.65487},
+    {"name": "Rodiles", "municipio_nombre": "Villaviciosa", "lat": 43.532527, "lon": -5.38244},
+    {"name": "Salinas", "municipio_nombre": "Castrillón", "lat": 43.5681, "lon": -6.0642},]
+    {"name": "Verdicio", "municipio_nombre": "Gozón", "lat": 43.5575, "lon": -5.9711},
+    {"name": "Xagó", "municipio_nombre": "Carreño", "lat": 43.5575, "lon": -5.9711},
+
+# ---------- WEBCAMS ----------
 
 WEBCAMS = {
-    "San Lorenzo (Gijón)": "https://www.webcamsdeasturias.com/asturias/centro/gijon/gijon/la-escalerona-playa-de-san-lorenzo-hd/148/",
-    "Aguilar (Muros de Nalón)": "https://www.webcamsdeasturias.com/asturias/bajo-nalon/muros-del-nalon/aguilar/playa-de-aguilar/122/",
-    "La Concha de Artedo (Cudillero)": "https://www.webcamsdeasturias.com/asturias/comarca-vaqueira/cudillero/cudillero/playa-de-la-concha-de-artedo/151/",
-    "Rodiles (Villaviciosa)": "https://www.webcamsdeasturias.com/asturias/comarca-de-la-sidra/villaviciosa/rodiles/rodiles-surf-hd/120/",
+    "San Lorenzo": "https://www.webcamsdeasturias.com/asturias/centro/gijon/gijon/la-escalerona-playa-de-san-lorenzo-hd/148/",
+    "Aguilar": "https://www.webcamsdeasturias.com/asturias/bajo-nalon/muros-del-nalon/aguilar/playa-de-aguilar/122/",
+    "La Concha de Artedo": "https://www.webcamsdeasturias.com/asturias/comarca-vaqueira/cudillero/cudillero/playa-de-la-concha-de-artedo/151/",
+    "Rodiles": "https://www.webcamsdeasturias.com/asturias/comarca-de-la-sidra/villaviciosa/rodiles/rodiles-surf-hd/120/",
+    "Salinas": "https://www.skylinewebcams.com/es/webcam/espana/asturias/salinas/playa.html",
+    "Verdicio": "https://www.webcamsdeasturias.com/asturias/cabo-penas/gozon/verdicio/verdicio/93/",
+    "Xagó": "https://www.webcamsdeasturias.com/asturias/cabo-penas/gozon/xago/playa-de-xago-hd/118/",
 }
 
 def norm_txt(s: str) -> str:
@@ -673,10 +678,11 @@ try:
             "Hora": f"{h}:00",
             "Tiempo": pick_icon(desc),
             "Temp": temp_map.get(h, ""),
-            "Lluvia": classify_lluvia(probprec_map.get(h, 0)),
-            "Viento": classify_viento(viento),
-            "Oleaje": classify_oleaje_marin(marine_row.get("wave_height", "")),
             "Marea": marea_text,
+            "Viento": classify_viento(viento),
+            "Lluvia": classify_lluvia(probprec_map.get(h, 0)),
+            "Oleaje": classify_oleaje_marin(marine_row.get("wave_height", "")),
+            
         })
 
     df = pd.DataFrame(rows)
