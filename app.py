@@ -32,9 +32,10 @@ BEACHES = [
     {"name": "La Concha de Artedo", "municipio_nombre": "Cudillero", "lat": 43.562699, "lon": -6.185861},
     {"name": "San Lorenzo", "municipio_nombre": "Gijón", "lat": 43.5405, "lon": -5.65487},
     {"name": "Rodiles", "municipio_nombre": "Villaviciosa", "lat": 43.532527, "lon": -5.38244},
-    {"name": "Salinas", "municipio_nombre": "Castrillón", "lat": 43.5681, "lon": -6.0642},]
+    {"name": "Salinas", "municipio_nombre": "Castrillón", "lat": 43.5681, "lon": -6.0642},
     {"name": "Verdicio", "municipio_nombre": "Gozón", "lat": 43.5575, "lon": -5.9711},
     {"name": "Xagó", "municipio_nombre": "Carreño", "lat": 43.5575, "lon": -5.9711},
+]
 
 # ---------- WEBCAMS ----------
 
